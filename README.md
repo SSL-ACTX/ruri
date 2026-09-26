@@ -1,33 +1,36 @@
 # Ruri
-
+ 
 **A Lightweight Pure-Rust Wireless ADB Client and Engine**
-
+ 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-2024_Edition-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/Platform-Android_%7C_Linux-green.svg)]()
-
+ 
 > [!NOTE]
 > `ruri` is an independent, zero-dependency pure-Rust implementation of the Android Debug Bridge (ADB) protocol. It runs natively on-device (e.g. inside Termux on Android) and Linux without requiring Google's official `adb` binary, Android SDK tools, or background server daemons.
-
+ 
 ---
-
+ 
 ## Overview
-
+ 
 Traditional ADB setups on Android devices require either rooting the device, running a bulky multi-megabyte C/C++ `adb` client bundled with a separate server daemon, or routing through Shizuku's IPC binder service (`rish`).
+ 
+`ruri` implements the core ADB framing protocol, SPAKE2 TLS pairing engine, sync file transfer, and pseudo-terminal (PTY) handling in pure Rust. It connects directly to the local `adbd` wireless debugging socket over `127.0.0.1`, authenticates via RSA / TLS certificates, and grants UID 2000 (`shell`) privileges with near-zero latency and minimal memory overhead.
 
-`ruri` implements the core ADB framing protocol, TLS pairing engine, sync file transfer, and pseudo-terminal (PTY) handling in pure Rust. It connects directly to the local `adbd` wireless debugging socket over `127.0.0.1`, authenticates via RSA / TLS certificates, and grants UID 2000 (`shell`) privileges with near-zero latency and minimal memory overhead.
-
+Beyond standard ADB operations, `ruri` includes a dedicated kernel syscall interceptor crate (`ruri-interceptor`). Utilizing `seccomp-bpf` user notifications and macro-driven ARM64 syscall dispatch, it enables user-space POSIX filesystem virtualization—intercepting `openat` and file operations transparently to bridge Termux userland with privileged Android namespaces (`/data/local/tmp`, `/sdcard`) without requiring `/dev/fuse` or root privileges.
+ 
 ---
-
+ 
 ## Architecture
-
+ 
 ```mermaid
 graph TD
     User["Terminal / User / Script"] --> CLI["ruri CLI / Crate API"]
 
-    subgraph "ruri Engine"
+    subgraph "ruri Workspace"
+        CLI --> RuriInterceptor["crates/ruri-interceptor (seccomp-bpf / Macro Syscall Table)"]
         CLI --> Scanner["Port Scanner (/proc/net/tcp)"]
-        CLI --> Pair["Pairing Engine (TLS / RFC 5280)"]
+        CLI --> Pair["SPAKE2 Pairing Engine (TLS 1.3 / Ed25519)"]
         CLI --> Transport["TCP Transport Layer"]
 
         Transport --> Protocol["ADB Framing (CNXN / AUTH / OPEN / WRTE)"]
@@ -36,31 +39,33 @@ graph TD
     end
 
     subgraph "Target Device (Localhost)"
+        RuriInterceptor -. "Intercept Syscalls / Inject FDs" .-> ChildProc["Supervised Process"]
         Scanner -. "Detect Port" .-> ADBD["Android adbd (UID 2000)"]
         Pair -- "TLS Handshake + Code" --> ADBD
         Protocol -- "Direct TCP Stream" --> ADBD
     end
 ```
-
+ 
 ---
-
-## Technical Characteristics
-
-1. **Native Protocol Implementation**: Directly handles ADB packet framing (`A_CNXN`, `A_AUTH`, `A_OPEN`, `A_OKAY`, `A_WRTE`, `A_CLSE`) over raw TCP sockets.
-2. **Local Wireless Pairing**: Self-generates X.509 certificates and handles the Android 11+ TLS pairing protocol without third-party toolchains.
-3. **Zero-Config Port Scanning**: Automatically identifies the ephemeral wireless debugging port assigned by Android via `/proc/net/tcp6` and `/proc/net/tcp` inspection, with fallback caching in `~/.ruri/last_port`.
-4. **Interactive PTY Shell**: Configures host terminal into raw mode (`termios`) with non-blocking asynchronous standard I/O polling, supporting full escape codes, signals, and text editors (`nano`, `vi`).
-5. **Direct Stream Transfers**: Implements the ADB `sync:` subprotocol (`SEND`, `RECV`, `DATA`, `DONE`) for file push and pull operations without base64 or temporary disk staging.
-6. **Dual Target Distribution**: Compiles to a standalone binary (`ruri`), a Rust library crate (`rlib`), and a C-compatible shared library (`libruri.so`).
-
+ 
+## Features
+ 
+- **Native Protocol Implementation**: Directly handles ADB packet framing (`A_CNXN`, `A_AUTH`, `A_OPEN`, `A_OKAY`, `A_WRTE`, `A_CLSE`) over raw TCP sockets.
+- **Pure-Rust Wireless Pairing**: Full native AOSP SPAKE2 implementation over TLS 1.3 key material export (RFC 5705) and Curve25519/Ed25519 scalar arithmetic, pairing directly with Android 11+ `adbd` with zero external dependencies.
+- **Zero-Config Port Scanning**: Automatically identifies the ephemeral wireless debugging port assigned by Android via `/proc/net/tcp6` and `/proc/net/tcp` inspection, with fallback caching in `~/.ruri/last_port`.
+- **Interactive PTY Shell**: Configures host terminal into raw mode (`termios`) with non-blocking asynchronous standard I/O polling, supporting full escape codes, signals, and text editors (`nano`, `vi`).
+- **Cross-Boundary File Operations**: Moves (`mv`) and copies (`cp`) files across Termux and Android device internal storage (`/data/local/tmp`, `/sdcard`) via native streaming sync.
+- **Direct Stream Transfers**: Implements the ADB `sync:` subprotocol (`SEND`, `RECV`, `DATA`, `DONE`) for file push and pull operations without base64 or temporary disk staging.
+- **Dual Target Distribution**: Compiles to a standalone binary (`ruri`), a Rust library crate (`rlib`), and a C-compatible shared library (`libruri.so`).
+ 
 ---
-
+ 
 ## CLI Usage
-
+ 
 ### Initial Setup & Pairing (One-Time)
-
+ 
 Enable **Wireless Debugging** in Developer Options, tap **Pair device with pairing code**, and run:
-
+ 
 ```bash
 # Interactive mode (prompts for port and 6-digit code):
 ruri pair
@@ -68,11 +73,11 @@ ruri pair
 # Or provide them directly:
 ruri pair <port> <code>
 ```
-
+ 
 Once paired, the key is permanently authorized. Subsequent executions auto-detect the active debugging port.
-
+ 
 ### Core Commands
-
+ 
 ```bash
 # Open interactive shell (UID 2000)
 ruri shell
@@ -86,19 +91,25 @@ ruri connect 38451
 # Scan localhost for open adbd instance
 ruri scan
 ```
-
-### File Transfer
-
+ 
+### Cross-Boundary File Operations
+ 
 ```bash
-# Push a local file to the device
-ruri push ./payload.bin /data/local/tmp/payload.bin
+# Copy file between Termux and device namespaces
+ruri cp ./local_config.json /data/local/tmp/config.json
+ruri cp /data/local/tmp/config.json ./downloaded_config.json
 
-# Pull a remote file to the local directory
+# Move file across boundaries (transfers then deletes source)
+ruri mv ./payload.bin /data/local/tmp/payload.bin
+ruri mv /data/local/tmp/payload.bin ./restored.bin
+
+# Direct push and pull
+ruri push ./payload.bin /data/local/tmp/payload.bin
 ruri pull /sdcard/Download/test.log ./test.log
 ```
-
+ 
 ### App & System Utilities
-
+ 
 ```bash
 # Direct stream APK installation (pm install -r -d -t)
 ruri install app-release.apk
@@ -118,15 +129,15 @@ ruri clear com.example.app
 ruri battery
 ruri pm list packages -s
 ```
-
+ 
 ---
-
+ 
 ## Programmatic Usage
-
+ 
 ### Rust Crate
-
+ 
 Add `ruri` to your `Cargo.toml`:
-
+ 
 ```rust
 use ruri::RuriClient;
 
@@ -144,11 +155,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
-
+ 
 ### C-ABI / FFI (`libruri.so`)
-
+ 
 `ruri` exports C-compatible symbols for embedding into other languages:
-
+ 
 ```c
 #include <stdint.h>
 #include <stdbool.h>
@@ -163,30 +174,40 @@ uint16_t ruri_scan_port(void);
 RuriResult ruri_exec_cmd(const char* cmd);
 void ruri_free_result(RuriResult res);
 ```
-
+ 
 ---
-
+ 
 ## Building from Source
-
+ 
 ```bash
-# Build optimized release binary
+# Debug build (fast compilation)
+cargo build
+
+# Optimized release binary
 cargo build --release
 
-# The compiled binary and shared library are output to:
-# target/release/ruri
-# target/release/libruri.so
+# Run workspace unit and kernel integration tests
+cargo test
 ```
 
----
+### Artifacts & Targets
 
+The build process outputs the standalone executable and dynamic library to `target/`:
+
+- **CLI Binary**: `target/release/ruri` (or `target/debug/ruri`)
+- **C-ABI Shared Library**: `target/release/libruri.so` (or `target/debug/libruri.so`)
+- **Rust Library Crate**: `crates/ruri` & `crates/ruri-interceptor` (importable directly in Cargo.toml)
+ 
+---
+ 
 ## License
-
+ 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
-
+ 
 ---
-
+ 
 <div align="center">
-
+ 
 Built with 🦀 by [Seuriin](https://github.com/SSL-ACTX) and [Iris-Seravelle](https://github.com/Iris-Seravelle)
-
+ 
 </div>

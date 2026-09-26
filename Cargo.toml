@@ -1,5 +1,11 @@
-[package]
-name = "ruri"
+[workspace]
+members = [
+    "crates/ruri",
+    "crates/ruri-interceptor",
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 authors = [
@@ -9,25 +15,17 @@ authors = [
 license = "Apache-2.0"
 repository = "https://github.com/SSL-ACTX/ruri"
 
-[lib]
-name = "ruri"
-crate-type = ["rlib", "cdylib"]
-path = "src/lib.rs"
-
-[[bin]]
-name = "ruri"
-path = "src/main.rs"
-
-[dependencies]
+[workspace.dependencies]
+ruri-interceptor = { path = "crates/ruri-interceptor" }
+libc = "0.2"
 rsa = { version = "0.9", default-features = false, features = ["std", "pem"] }
-sha1 = { version = "0.10", default-features = false, features = ["oid"] }
 base64 = "0.22"
 rand = "0.8"
 num-bigint = { version = "0.4", default-features = false }
-num-traits = { version = "0.2", default-features = false }
-libc = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rcgen = "0.13"
+ring = "0.17"
+curve25519-dalek = { version = "4", features = ["rand_core"] }
 
 [profile.release]
 opt-level = 3

@@ -23,13 +23,16 @@ USAGE:
     ruri [COMMAND] [ARGS...]
 
 CORE COMMANDS:
+    run <cmd> [args...]   Run command transparently intercepting POSIX fs syscalls
     shell                 Open interactive UID 2000 shell
     exec <command>        Execute command and pipe stdout/stderr
     pair [port] [code]    One-time pairing setup (interactive if args omitted)
     scan                  Scan localhost for adbd port
     connect <port>        Connect to explicit port and open shell
 
-FILE TRANSFER:
+FILE OPERATIONS:
+    cp <src> <dst>        Copy files between Termux and device (or device-to-device)
+    mv <src> <dst>        Move/rename files (cross-boundary or device-internal)
     push <local> <remote> Upload file to device (/sdcard, /data/local/tmp)
     pull <remote> <local> Download file from device to Termux
 
@@ -97,22 +100,21 @@ fn run_pair_flow(args: &[String]) {
         format!("127.0.0.1:{}", port)
     };
 
-    println!("[*] Pairing with {} using code {}...", target, code);
-    let status = Command::new("adb").args(["pair", &target, &code]).status();
-
-    match status {
-        Ok(s) if s.success() => {
-            println!("[+] Successfully paired!");
-            let _ = Command::new("adb").args(["tcpip", "5555"]).status();
-            let _ = Command::new("adb").args(["kill-server"]).status();
-            println!(
-                "[+] ruri is now fully paired and configured permanently on port 5555!"
-            );
+    println!(
+        "[*] Native pure-Rust pairing with {} using code {}...",
+        target, code
+    );
+    match crypto::pair_device(&target, &code, Duration::from_secs(5)) {
+        Ok(()) => {
+            println!("[+] Successfully paired natively without external adb!");
+            println!("[+] ruri's RSA public key is now trusted by adbd.");
         }
-        _ => {
+        Err(e) => {
             eprintln!(
-                "[-] Pairing failed. Make sure the pairing dialog is still visible on your screen."
+                "[-] Pairing failed: {}. Make sure the pairing dialog is still active on screen.",
+                e
             );
+            exit(1);
         }
     }
 }
@@ -129,6 +131,57 @@ fn main() {
     match args[0].as_str() {
         "help" | "-h" | "--help" => {
             print_usage();
+        }
+        "run" => {
+            if args.len() < 2 {
+                eprintln!("Usage: ruri run <command> [args...]");
+                exit(1);
+            }
+            let cmd = &args[1];
+            let sub_args = &args[2..];
+            let port = resolve_port();
+
+            println!(
+                "[*] Transparent VFS supervisor active for '{}' (adbd localhost:{})",
+                cmd, port
+            );
+            let code = ruri_interceptor::supervisor::run_supervised_command(
+                cmd,
+                sub_args,
+                move |_pid, path, _flags, _mode| {
+                    if path.starts_with("/data/local/tmp/") || path.starts_with("/sdcard/") {
+                        println!("[intercept:openat] Streaming remote file: {}", path);
+                        let addr = format!("127.0.0.1:{}", port);
+                        if let Ok(conn) = AdbConnection::connect(&addr, Duration::from_secs(3)) {
+                            let stream = conn.into_stream();
+                            let mut buf = Vec::new();
+                            let exec_cmd = format!("cat '{}'", path);
+                            if protocol::run_exec_to_writer(stream, &exec_cmd, &mut buf).is_ok() {
+                                // Create anonymous in-memory file descriptor
+                                let memfd_name = std::ffi::CString::new("ruri_vfs").unwrap();
+                                let mfd = unsafe { libc::syscall(libc::SYS_memfd_create, memfd_name.as_ptr(), libc::MFD_CLOEXEC) } as i32;
+                                if mfd >= 0 {
+                                    use std::io::Write;
+                                    use std::os::fd::FromRawFd;
+                                    let mut f = unsafe { std::fs::File::from_raw_fd(mfd) };
+                                    let _ = f.write_all(&buf);
+                                    let _ = f.flush();
+                                    unsafe { libc::lseek(mfd, 0, libc::SEEK_SET) };
+                                    std::mem::forget(f); // keep fd open for injection
+                                    return ruri_interceptor::supervisor::InterceptDecision::InjectFd(mfd);
+                                }
+                            }
+                        }
+                        ruri_interceptor::supervisor::InterceptDecision::ReturnError(libc::ENOENT)
+                    } else {
+                        ruri_interceptor::supervisor::InterceptDecision::ContinueNative
+                    }
+                },
+            ).unwrap_or_else(|e| {
+                eprintln!("[-] Supervised run error: {}", e);
+                exit(1);
+            });
+            exit(code);
         }
         "pair" => {
             run_pair_flow(&args[1..]);
@@ -235,6 +288,165 @@ fn main() {
                 Err(e) => {
                     eprintln!("[-] Connection error: {}", e);
                     exit(1);
+                }
+            }
+        }
+        "cp" => {
+            if args.len() < 3 {
+                eprintln!("Usage: ruri cp <src> <dst>");
+                eprintln!(
+                    "Prefix with ':' to explicitly force adbd remote (e.g. ruri cp :file.txt local.txt)"
+                );
+                exit(1);
+            }
+            let (src_is_remote, clean_src) = if args[1].starts_with(':') {
+                (true, &args[1][1..])
+            } else if args[1].starts_with("/data/local/tmp")
+                || args[1].starts_with("/sdcard")
+                || args[1].starts_with("/system")
+            {
+                (true, args[1].as_str())
+            } else {
+                (!Path::new(&args[1]).exists(), args[1].as_str())
+            };
+
+            let (dst_is_remote, clean_dst) = if args[2].starts_with(':') {
+                (true, &args[2][1..])
+            } else if args[2].starts_with("/data/local/tmp")
+                || args[2].starts_with("/sdcard")
+                || args[2].starts_with("/system")
+            {
+                (true, args[2].as_str())
+            } else {
+                (false, args[2].as_str())
+            };
+
+            let port = resolve_port();
+
+            if !src_is_remote && dst_is_remote {
+                // Local -> Remote (push)
+                let addr = format!("127.0.0.1:{}", port);
+                let conn = AdbConnection::connect(&addr, Duration::from_secs(3))
+                    .map_err(|e| {
+                        eprintln!("[-] Connection error: {}", e);
+                        exit(1);
+                    })
+                    .unwrap();
+                let stream = conn.into_stream();
+                if let Err(e) = push_file(stream, Path::new(clean_src), clean_dst) {
+                    eprintln!("[-] Copy failed: {}", e);
+                    exit(1);
+                }
+                println!("[+] Copied {} -> [adbd]{}", clean_src, clean_dst);
+            } else if src_is_remote && !dst_is_remote {
+                // Remote -> Local (pull)
+                let addr = format!("127.0.0.1:{}", port);
+                let conn = AdbConnection::connect(&addr, Duration::from_secs(3))
+                    .map_err(|e| {
+                        eprintln!("[-] Connection error: {}", e);
+                        exit(1);
+                    })
+                    .unwrap();
+                let stream = conn.into_stream();
+                if let Err(e) = pull_file(stream, clean_src, Path::new(clean_dst)) {
+                    eprintln!("[-] Copy failed: {}", e);
+                    exit(1);
+                }
+                println!("[+] Copied [adbd]{} -> {}", clean_src, clean_dst);
+            } else if src_is_remote && dst_is_remote {
+                // Remote -> Remote
+                let cmd = format!("cp -r '{}' '{}'", clean_src, clean_dst);
+                connect_and_exec(port, &cmd);
+                println!("[+] Copied [adbd]{} -> [adbd]{}", clean_src, clean_dst);
+            } else {
+                // Local -> Local
+                match std::fs::copy(clean_src, clean_dst) {
+                    Ok(n) => println!("[+] Copied {} bytes (local -> local)", n),
+                    Err(e) => {
+                        eprintln!("[-] Copy error: {}", e);
+                        exit(1);
+                    }
+                }
+            }
+        }
+        "mv" => {
+            if args.len() < 3 {
+                eprintln!("Usage: ruri mv <src> <dst>");
+                eprintln!(
+                    "Prefix with ':' to explicitly force adbd remote (e.g. ruri mv :file.txt local.txt)"
+                );
+                exit(1);
+            }
+            let (src_is_remote, clean_src) = if args[1].starts_with(':') {
+                (true, &args[1][1..])
+            } else if args[1].starts_with("/data/local/tmp")
+                || args[1].starts_with("/sdcard")
+                || args[1].starts_with("/system")
+            {
+                (true, args[1].as_str())
+            } else {
+                (!Path::new(&args[1]).exists(), args[1].as_str())
+            };
+
+            let (dst_is_remote, clean_dst) = if args[2].starts_with(':') {
+                (true, &args[2][1..])
+            } else if args[2].starts_with("/data/local/tmp")
+                || args[2].starts_with("/sdcard")
+                || args[2].starts_with("/system")
+            {
+                (true, args[2].as_str())
+            } else {
+                (false, args[2].as_str())
+            };
+
+            let port = resolve_port();
+
+            if !src_is_remote && dst_is_remote {
+                // Local -> Remote (push + rm local)
+                let addr = format!("127.0.0.1:{}", port);
+                let conn = AdbConnection::connect(&addr, Duration::from_secs(3))
+                    .map_err(|e| {
+                        eprintln!("[-] Connection error: {}", e);
+                        exit(1);
+                    })
+                    .unwrap();
+                let stream = conn.into_stream();
+                if let Err(e) = push_file(stream, Path::new(clean_src), clean_dst) {
+                    eprintln!("[-] Move failed: {}", e);
+                    exit(1);
+                }
+                let _ = std::fs::remove_file(clean_src);
+                println!("[+] Moved {} -> [adbd]{}", clean_src, clean_dst);
+            } else if src_is_remote && !dst_is_remote {
+                // Remote -> Local (pull + rm remote)
+                let addr = format!("127.0.0.1:{}", port);
+                let conn = AdbConnection::connect(&addr, Duration::from_secs(3))
+                    .map_err(|e| {
+                        eprintln!("[-] Connection error: {}", e);
+                        exit(1);
+                    })
+                    .unwrap();
+                let stream = conn.into_stream();
+                if let Err(e) = pull_file(stream, clean_src, Path::new(clean_dst)) {
+                    eprintln!("[-] Move failed: {}", e);
+                    exit(1);
+                }
+                let rm_cmd = format!("rm -rf '{}'", clean_src);
+                connect_and_exec(port, &rm_cmd);
+                println!("[+] Moved [adbd]{} -> {}", clean_src, clean_dst);
+            } else if src_is_remote && dst_is_remote {
+                // Remote -> Remote
+                let cmd = format!("mv '{}' '{}'", clean_src, clean_dst);
+                connect_and_exec(port, &cmd);
+                println!("[+] Moved [adbd]{} -> [adbd]{}", clean_src, clean_dst);
+            } else {
+                // Local -> Local
+                match std::fs::rename(clean_src, clean_dst) {
+                    Ok(_) => println!("[+] Moved {} -> {}", clean_src, clean_dst),
+                    Err(e) => {
+                        eprintln!("[-] Move error: {}", e);
+                        exit(1);
+                    }
                 }
             }
         }

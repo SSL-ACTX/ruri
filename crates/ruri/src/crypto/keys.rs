@@ -86,8 +86,6 @@ pub fn format_adb_public_key(pub_key: &RsaPublicKey, banner: &str) -> String {
 ///     int exponent;             // 3 or 65537
 /// };
 pub fn serialize_android_rsapublickey(pub_key: &RsaPublicKey) -> Vec<u8> {
-    use num_traits::One;
-
     let n = pub_key.n();
     let e = pub_key.e();
 
@@ -122,7 +120,7 @@ pub fn serialize_android_rsapublickey(pub_key: &RsaPublicKey) -> Vec<u8> {
 
     // rr: R^2 mod N, where R = 2^(2048)
     // R^2 = 2^(4096)
-    let r: BigUint = BigUint::one() << 2048;
+    let r: BigUint = BigUint::from(1u32) << 2048;
     let rr: BigUint = (&r * &r) % n;
     let rr_bytes_le = rr.to_bytes_le();
     let mut rr_arr = vec![0u8; 256];

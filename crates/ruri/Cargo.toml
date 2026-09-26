@@ -1,0 +1,28 @@
+[package]
+name = "ruri"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ruri"
+crate-type = ["rlib", "cdylib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ruri"
+path = "src/main.rs"
+
+[dependencies]
+ruri-interceptor.workspace = true
+libc.workspace = true
+rsa.workspace = true
+base64.workspace = true
+rand.workspace = true
+num-bigint.workspace = true
+rustls.workspace = true
+rcgen.workspace = true
+ring.workspace = true
+curve25519-dalek.workspace = true

@@ -154,16 +154,17 @@ pub fn pull_file(
 
     let wrte = AdbMessage::wrte(local_id, remote_id, recv_payload);
     wrte.write_to(&mut stream)?;
-    read_ack(&mut stream)?;
 
     // 2. Read DATA chunks until DONE
     let mut received: u64 = 0;
+    let mut stream_buf = Vec::new();
+
     loop {
         let msg = AdbMessage::read_from(&mut stream)?;
         if msg.header.command == A_CLSE {
             break;
         }
-        if msg.header.command != A_WRTE || msg.payload.is_empty() {
+        if msg.header.command != A_WRTE {
             continue;
         }
 
@@ -171,38 +172,52 @@ pub fn pull_file(
         let ack = AdbMessage::okay(local_id, remote_id);
         ack.write_to(&mut stream)?;
 
-        let mut offset = 0;
-        let payload = &msg.payload;
+        stream_buf.extend_from_slice(&msg.payload);
 
-        while offset + 8 <= payload.len() {
-            let chunk_id = &payload[offset..offset + 4];
+        let mut offset = 0;
+
+        while offset + 8 <= stream_buf.len() {
+            let chunk_id = &stream_buf[offset..offset + 4];
             let chunk_len = u32::from_le_bytes(
-                payload[offset + 4..offset + 8].try_into().unwrap(),
+                stream_buf[offset + 4..offset + 8].try_into().unwrap(),
             ) as usize;
-            offset += 8;
 
             if chunk_id == ID_DONE {
+                println!();
                 let clse = AdbMessage::clse(local_id, remote_id);
                 let _ = clse.write_to(&mut stream);
-                println!();
                 return Ok(());
             } else if chunk_id == ID_FAIL {
-                let err_msg =
-                    String::from_utf8_lossy(&payload[offset..offset + chunk_len]);
+                if offset + 8 + chunk_len > stream_buf.len() {
+                    break;
+                }
+                let err_msg = String::from_utf8_lossy(
+                    &stream_buf[offset + 8..offset + 8 + chunk_len],
+                );
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
                     format!("Sync pull failed: {}", err_msg),
                 ));
             } else if chunk_id == ID_DATA {
-                let data_end = (offset + chunk_len).min(payload.len());
-                file.write_all(&payload[offset..data_end])?;
-                received += (data_end - offset) as u64;
-                offset = data_end;
+                if offset + 8 + chunk_len > stream_buf.len() {
+                    // Need more bytes to complete this chunk
+                    break;
+                }
+                file.write_all(&stream_buf[offset + 8..offset + 8 + chunk_len])?;
+                received += chunk_len as u64;
+                offset += 8 + chunk_len;
                 print!("\r[*] Downloading: {} bytes received", received);
                 let _ = io::stdout().flush();
             } else {
-                break;
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Unknown sync chunk ID: {:?}", chunk_id),
+                ));
             }
+        }
+
+        if offset > 0 {
+            stream_buf.drain(..offset);
         }
     }
 
