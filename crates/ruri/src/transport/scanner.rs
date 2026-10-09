@@ -65,16 +65,16 @@ pub fn scan_local_adbd(start_port: u16, end_port: u16) -> Option<u16> {
         return Some(5555);
     }
 
-    if let Some(cached) = read_cached_port() {
-        if is_adb_port(cached, Duration::from_millis(50)) {
-            return Some(cached);
-        }
+    if let Some(cached) = read_cached_port()
+        && is_adb_port(cached, Duration::from_millis(50))
+    {
+        return Some(cached);
     }
 
     let found = Arc::new(AtomicU16::new(0));
     let worker_count = 32;
     let total_ports = (end_port - start_port + 1) as usize;
-    let chunk_size = (total_ports + worker_count - 1) / worker_count;
+    let chunk_size = total_ports.div_ceil(worker_count);
 
     let mut handles = Vec::new();
 

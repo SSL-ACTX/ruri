@@ -122,8 +122,7 @@ impl AdbConnection {
     }
 
     fn handshake(&mut self, addr: &str) -> io::Result<()> {
-        let private_key = get_or_create_key()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let private_key = get_or_create_key().map_err(io::Error::other)?;
         let public_key = RsaPublicKey::from(&private_key);
 
         // 1. Send CNXN
@@ -137,10 +136,7 @@ impl AdbConnection {
         // Check for A_STLS (Wireless Debugging on Android 11+)
         if response.header.command == A_STLS {
             self.upgrade_to_tls(addr)?;
-            // Inside TLS tunnel, re-send CNXN
-            let cnxn_tls = AdbMessage::cnxn(banner_str);
-            cnxn_tls.write_to(&mut self.stream)?;
-
+            // Inside TLS tunnel, adbd sends CNXN first upon TLS handshake completion
             let tls_response = AdbMessage::read_from(&mut self.stream)?;
             if tls_response.header.command == A_CNXN {
                 self.banner =
@@ -175,8 +171,8 @@ impl AdbConnection {
             }
         };
 
-        let (cert_der, key_der) = get_or_generate_tls_cert()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let (cert_der, key_der) =
+            get_or_generate_tls_cert().map_err(io::Error::other)?;
 
         let certs = vec![CertificateDer::from(cert_der)];
         let key = PrivateKeyDer::try_from(key_der).map_err(|e| {
@@ -195,18 +191,18 @@ impl AdbConnection {
             rustls::crypto::ring::default_provider(),
         ))
         .with_safe_default_protocol_versions()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+        .map_err(|e| io::Error::other(e.to_string()))?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(DummyServerVerifier))
         .with_client_auth_cert(certs, key)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| io::Error::other(e.to_string()))?;
 
         let server_name = ServerName::try_from("localhost").map_err(|e| {
             io::Error::new(io::ErrorKind::InvalidInput, e.to_string())
         })?;
 
         let client = ClientConnection::new(Arc::new(config), server_name)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
         let tls_stream = StreamOwned::new(client, ack_stream);
         self.stream = AdbStream::Tls(Box::new(tls_stream));
@@ -233,8 +229,7 @@ impl AdbConnection {
         }
 
         let token = response.payload;
-        let signature = sign_token(private_key, &token)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let signature = sign_token(private_key, &token).map_err(io::Error::other)?;
 
         let auth_resp = AdbMessage::new(A_AUTH, AUTH_TYPE_SIGNATURE, 0, signature);
         auth_resp.write_to(&mut self.stream)?;

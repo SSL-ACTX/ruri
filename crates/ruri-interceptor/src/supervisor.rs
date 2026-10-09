@@ -152,19 +152,13 @@ where
 
         if ret <= 0 {
             let _ = child.kill();
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Failed to receive fd from child socket",
-            ));
+            return Err(io::Error::other("Failed to receive fd from child socket"));
         }
 
         let cmsg = libc::CMSG_FIRSTHDR(&msg);
         if cmsg.is_null() || (*cmsg).cmsg_type != libc::SCM_RIGHTS {
             let _ = child.kill();
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Invalid SCM_RIGHTS message received",
-            ));
+            return Err(io::Error::other("Invalid SCM_RIGHTS message received"));
         }
 
         let fd_ptr = libc::CMSG_DATA(cmsg) as *const libc::c_int;

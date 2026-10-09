@@ -36,7 +36,7 @@ strip = true
 incremental = false
 
 [profile.dev]
-opt-level = 0
+opt-level = 1
 debug = 1
 strip = true
 panic = "unwind"

@@ -109,10 +109,7 @@ pub fn push_file(
             let err_msg = String::from_utf8_lossy(
                 &resp.payload[8..(8 + msg_len).min(resp.payload.len())],
             );
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("Sync failed: {}", err_msg),
-            ));
+            return Err(io::Error::other(format!("Sync failed: {}", err_msg)));
         }
     }
 
@@ -194,10 +191,10 @@ pub fn pull_file(
                 let err_msg = String::from_utf8_lossy(
                     &stream_buf[offset + 8..offset + 8 + chunk_len],
                 );
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Sync pull failed: {}", err_msg),
-                ));
+                return Err(io::Error::other(format!(
+                    "Sync pull failed: {}",
+                    err_msg
+                )));
             } else if chunk_id == ID_DATA {
                 if offset + 8 + chunk_len > stream_buf.len() {
                     // Need more bytes to complete this chunk

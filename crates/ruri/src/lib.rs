@@ -72,20 +72,15 @@ impl RuriClient {
         let remote_id = ok_resp.header.arg0;
         let mut output = Vec::new();
 
-        loop {
-            match AdbMessage::read_from(&mut stream) {
-                Ok(msg) => {
-                    if msg.header.command == A_WRTE {
-                        output.extend_from_slice(&msg.payload);
-                        let ack = AdbMessage::okay(local_id, remote_id);
-                        let _ = ack.write_to(&mut stream);
-                    } else if msg.header.command == A_CLSE {
-                        let ack = AdbMessage::clse(local_id, remote_id);
-                        let _ = ack.write_to(&mut stream);
-                        break;
-                    }
-                }
-                Err(_) => break,
+        while let Ok(msg) = AdbMessage::read_from(&mut stream) {
+            if msg.header.command == A_WRTE {
+                output.extend_from_slice(&msg.payload);
+                let ack = AdbMessage::okay(local_id, remote_id);
+                let _ = ack.write_to(&mut stream);
+            } else if msg.header.command == A_CLSE {
+                let ack = AdbMessage::clse(local_id, remote_id);
+                let _ = ack.write_to(&mut stream);
+                break;
             }
         }
 
@@ -186,10 +181,10 @@ impl RuriClient {
                 let err_msg = String::from_utf8_lossy(
                     &resp.payload[8..(8 + msg_len).min(resp.payload.len())],
                 );
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Sync push failed: {}", err_msg),
-                ));
+                return Err(io::Error::other(format!(
+                    "Sync push failed: {}",
+                    err_msg
+                )));
             }
         }
 
@@ -243,6 +238,11 @@ pub extern "C" fn ruri_scan_port() -> u16 {
     scan_local_adbd(30000, 45000).unwrap_or(0)
 }
 
+/// Executes a shell command via `ruri` over ADB.
+///
+/// # Safety
+///
+/// `cmd_ptr` must be a valid, null-terminated C string pointer or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ruri_exec_cmd(cmd_ptr: *const libc::c_char) -> RuriResult {
     if cmd_ptr.is_null() {
@@ -295,6 +295,11 @@ pub unsafe extern "C" fn ruri_exec_cmd(cmd_ptr: *const libc::c_char) -> RuriResu
     }
 }
 
+/// Frees an allocated `RuriResult` buffer.
+///
+/// # Safety
+///
+/// `res.data` must point to memory previously allocated by `ruri_exec_cmd` with the corresponding `res.len`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ruri_free_result(res: RuriResult) {
     if !res.data.is_null() && res.len > 0 {

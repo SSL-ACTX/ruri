@@ -42,15 +42,14 @@ impl hkdf::KeyType for AesKeyLen {
 fn derive_aes_key(key_material: &[u8; 64]) -> io::Result<LessSafeKey> {
     let salt = hkdf::Salt::new(HKDF_SHA256, &[]);
     let prk = salt.extract(key_material);
-    let okm = prk.expand(&[HKDF_AES_INFO], AesKeyLen).map_err(|_| {
-        io::Error::new(io::ErrorKind::Other, "HKDF expansion failed")
-    })?;
+    let okm = prk
+        .expand(&[HKDF_AES_INFO], AesKeyLen)
+        .map_err(|_| io::Error::other("HKDF expansion failed"))?;
     let mut aes_key = [0u8; 16];
     okm.fill(&mut aes_key)
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "HKDF fill failed"))?;
-    let unbound = UnboundKey::new(&AES_128_GCM, &aes_key).map_err(|_| {
-        io::Error::new(io::ErrorKind::Other, "Failed to create AES key")
-    })?;
+        .map_err(|_| io::Error::other("HKDF fill failed"))?;
+    let unbound = UnboundKey::new(&AES_128_GCM, &aes_key)
+        .map_err(|_| io::Error::other("Failed to create AES key"))?;
     Ok(LessSafeKey::new(unbound))
 }
 
@@ -84,7 +83,7 @@ fn scalar_mul_integer(
     let zero = num_bigint::BigUint::from(0u32);
     while scalar > zero {
         if (scalar.to_u32_digits().first().copied().unwrap_or(0) & 1) != 0 {
-            result = result + base;
+            result += base;
         }
         base = base + base;
         scalar >>= 1;
@@ -139,9 +138,8 @@ impl Spake2Party {
         // 1. Generate ephemeral private key: (rand mod L) * 8
         let rng = SystemRandom::new();
         let mut rand_bytes = [0u8; 64];
-        rng.fill(&mut rand_bytes).map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "Random generation failed")
-        })?;
+        rng.fill(&mut rand_bytes)
+            .map_err(|_| io::Error::other("Random generation failed"))?;
         let rand_scalar = Scalar::from_bytes_mod_order_wide(&rand_bytes);
         let priv_scalar = rand_scalar * Scalar::from(8u64);
 
@@ -309,8 +307,8 @@ pub fn pair_device(addr: &str, password: &str, timeout: Duration) -> io::Result<
     tcp.set_write_timeout(Some(timeout))?;
 
     // 1. Setup client TLS credentials
-    let (cert_der, key_der) = get_or_generate_tls_cert()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let (cert_der, key_der) =
+        get_or_generate_tls_cert().map_err(io::Error::other)?;
 
     let cert_pki = CertificateDer::from(cert_der);
     let key_pki = rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.into());
@@ -325,7 +323,7 @@ pub fn pair_device(addr: &str, password: &str, timeout: Duration) -> io::Result<
 
     let server_name = "localhost".try_into().unwrap();
     let client_conn = ClientConnection::new(Arc::new(config), server_name)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| io::Error::other(e.to_string()))?;
 
     let mut tls_stream = StreamOwned::new(client_conn, tcp);
     while tls_stream.conn.is_handshaking() {
@@ -337,12 +335,7 @@ pub fn pair_device(addr: &str, password: &str, timeout: Duration) -> io::Result<
     tls_stream
         .conn
         .export_keying_material(&mut exported_key, EXPORTED_KEY_LABEL, None)
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("TLS key export failed: {}", e),
-            )
-        })?;
+        .map_err(|e| io::Error::other(format!("TLS key export failed: {}", e)))?;
 
     // 3. Form final SPAKE2 password = [ASCII PIN] + [64 bytes TLS key material]
     let mut full_password = Vec::with_capacity(password.len() + exported_key.len());
@@ -390,8 +383,7 @@ pub fn pair_device(addr: &str, password: &str, timeout: Duration) -> io::Result<
     let cipher = derive_aes_key(&key_material)?;
 
     // 8. Build PeerInfo packet containing RSA public key
-    let priv_key =
-        get_or_create_key().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let priv_key = get_or_create_key().map_err(io::Error::other)?;
     let adb_pub_string =
         format_adb_public_key(&priv_key.to_public_key(), "ruri@localhost");
 
@@ -405,9 +397,7 @@ pub fn pair_device(addr: &str, password: &str, timeout: Duration) -> io::Result<
     let nonce = Nonce::assume_unique_for_key([0u8; 12]);
     cipher
         .seal_in_place_append_tag(nonce, Aad::empty(), &mut peer_info)
-        .map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "Failed to encrypt PeerInfo")
-        })?;
+        .map_err(|_| io::Error::other("Failed to encrypt PeerInfo"))?;
     let encrypted_peer_info = peer_info;
 
     // 9. Send encrypted PEER_INFO (Type 1)

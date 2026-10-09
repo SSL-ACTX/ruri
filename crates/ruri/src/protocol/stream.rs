@@ -45,21 +45,16 @@ pub fn run_exec_to_writer<W: Write>(
 
     let remote_id = ok_resp.header.arg0;
 
-    loop {
-        match AdbMessage::read_from(&mut stream) {
-            Ok(msg) => {
-                if msg.header.command == A_WRTE {
-                    let _ = writer.write_all(&msg.payload);
-                    let _ = writer.flush();
-                    let ack = AdbMessage::okay(local_id, remote_id);
-                    let _ = ack.write_to(&mut stream);
-                } else if msg.header.command == A_CLSE {
-                    let ack = AdbMessage::clse(local_id, remote_id);
-                    let _ = ack.write_to(&mut stream);
-                    break;
-                }
-            }
-            Err(_) => break,
+    while let Ok(msg) = AdbMessage::read_from(&mut stream) {
+        if msg.header.command == A_WRTE {
+            let _ = writer.write_all(&msg.payload);
+            let _ = writer.flush();
+            let ack = AdbMessage::okay(local_id, remote_id);
+            let _ = ack.write_to(&mut stream);
+        } else if msg.header.command == A_CLSE {
+            let ack = AdbMessage::clse(local_id, remote_id);
+            let _ = ack.write_to(&mut stream);
+            break;
         }
     }
 
@@ -114,21 +109,16 @@ pub fn run_exec_piped_input<R: Read>(
 
     // Read remaining output until CLSE
     let mut stdout = io::stdout();
-    loop {
-        match AdbMessage::read_from(&mut stream) {
-            Ok(msg) => {
-                if msg.header.command == A_WRTE {
-                    let _ = stdout.write_all(&msg.payload);
-                    let _ = stdout.flush();
-                    let ack = AdbMessage::okay(local_id, remote_id);
-                    let _ = ack.write_to(&mut stream);
-                } else if msg.header.command == A_CLSE {
-                    let ack = AdbMessage::clse(local_id, remote_id);
-                    let _ = ack.write_to(&mut stream);
-                    break;
-                }
-            }
-            Err(_) => break,
+    while let Ok(msg) = AdbMessage::read_from(&mut stream) {
+        if msg.header.command == A_WRTE {
+            let _ = stdout.write_all(&msg.payload);
+            let _ = stdout.flush();
+            let ack = AdbMessage::okay(local_id, remote_id);
+            let _ = ack.write_to(&mut stream);
+        } else if msg.header.command == A_CLSE {
+            let ack = AdbMessage::clse(local_id, remote_id);
+            let _ = ack.write_to(&mut stream);
+            break;
         }
     }
 
@@ -247,19 +237,14 @@ pub fn run_interactive_shell(stream: AdbStream) -> io::Result<()> {
             let remote_id = ok_resp.header.arg0;
             let mut stdout = io::stdout();
 
-            loop {
-                match AdbMessage::read_from(&mut s) {
-                    Ok(msg) => {
-                        if msg.header.command == A_WRTE {
-                            let _ = stdout.write_all(&msg.payload);
-                            let _ = stdout.flush();
-                            let ack = AdbMessage::okay(local_id, remote_id);
-                            let _ = ack.write_to(&mut s);
-                        } else if msg.header.command == A_CLSE {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
+            while let Ok(msg) = AdbMessage::read_from(&mut s) {
+                if msg.header.command == A_WRTE {
+                    let _ = stdout.write_all(&msg.payload);
+                    let _ = stdout.flush();
+                    let ack = AdbMessage::okay(local_id, remote_id);
+                    let _ = ack.write_to(&mut s);
+                } else if msg.header.command == A_CLSE {
+                    break;
                 }
             }
 
