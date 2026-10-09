@@ -71,6 +71,15 @@ pub fn scan_local_adbd(start_port: u16, end_port: u16) -> Option<u16> {
         return Some(cached);
     }
 
+    // Try fast zero-scan mDNS discovery (_adb-tls-connect._tcp.local)
+    if let Some(mdns_port) =
+        super::mdns::discover_adbd_mdns(Duration::from_millis(250))
+        && is_adb_port(mdns_port, Duration::from_millis(100))
+    {
+        save_cached_port(mdns_port);
+        return Some(mdns_port);
+    }
+
     let found = Arc::new(AtomicU16::new(0));
     let worker_count = 32;
     let total_ports = (end_port - start_port + 1) as usize;

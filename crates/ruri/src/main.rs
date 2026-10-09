@@ -29,6 +29,7 @@ CORE COMMANDS:
     pair [port] [code]    One-time pairing setup (interactive if args omitted)
     scan                  Scan localhost for adbd port
     connect <port>        Connect to explicit port and open shell
+    forward <lport> <rtarget> Forward localhost port to device (e.g. forward 8080 tcp:8080)
 
 FILE OPERATIONS:
     cp <src> <dst>        Copy files between Termux and device (or device-to-device)
@@ -212,6 +213,24 @@ fn main() {
             }
             let port: u16 = args[1].parse().expect("Invalid port number");
             connect_and_shell(port);
+        }
+        "forward" => {
+            if args.len() < 3 {
+                eprintln!("Usage: ruri forward <local_port> <remote_target>");
+                eprintln!("Example: ruri forward 8080 tcp:8080");
+                exit(1);
+            }
+            let local_port: u16 =
+                args[1].parse().expect("Invalid local port number");
+            let remote_target = &args[2];
+            let adb_port = resolve_port();
+            let adb_addr = format!("127.0.0.1:{}", adb_port);
+            if let Err(e) =
+                protocol::start_port_forward(&adb_addr, local_port, remote_target)
+            {
+                eprintln!("[-] Port forwarding error: {}", e);
+                exit(1);
+            }
         }
         "shell" => {
             let port = resolve_port();

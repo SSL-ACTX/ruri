@@ -1,6 +1,6 @@
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rustls::client::danger::{
@@ -66,14 +66,17 @@ impl ServerCertVerifier for DummyServerVerifier {
 
 pub enum AdbStream {
     Plain(TcpStream),
-    Tls(Box<StreamOwned<ClientConnection, TcpStream>>),
+    Tls(Arc<Mutex<StreamOwned<ClientConnection, TcpStream>>>),
 }
 
 impl Read for AdbStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             AdbStream::Plain(s) => s.read(buf),
-            AdbStream::Tls(s) => s.read(buf),
+            AdbStream::Tls(s) => {
+                let mut guard = s.lock().unwrap();
+                guard.read(buf)
+            }
         }
     }
 }
@@ -82,14 +85,49 @@ impl Write for AdbStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
             AdbStream::Plain(s) => s.write(buf),
-            AdbStream::Tls(s) => s.write(buf),
+            AdbStream::Tls(s) => {
+                let mut guard = s.lock().unwrap();
+                guard.write(buf)
+            }
         }
     }
 
     fn flush(&mut self) -> io::Result<()> {
         match self {
             AdbStream::Plain(s) => s.flush(),
-            AdbStream::Tls(s) => s.flush(),
+            AdbStream::Tls(s) => {
+                let mut guard = s.lock().unwrap();
+                guard.flush()
+            }
+        }
+    }
+}
+
+impl AdbStream {
+    pub fn try_clone(&self) -> io::Result<Self> {
+        match self {
+            AdbStream::Plain(s) => Ok(AdbStream::Plain(s.try_clone()?)),
+            AdbStream::Tls(s) => Ok(AdbStream::Tls(Arc::clone(s))),
+        }
+    }
+
+    pub fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        match self {
+            AdbStream::Plain(s) => s.set_read_timeout(dur),
+            AdbStream::Tls(s) => {
+                let guard = s.lock().unwrap();
+                guard.get_ref().set_read_timeout(dur)
+            }
+        }
+    }
+
+    pub fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        match self {
+            AdbStream::Plain(s) => s.set_write_timeout(dur),
+            AdbStream::Tls(s) => {
+                let guard = s.lock().unwrap();
+                guard.get_ref().set_write_timeout(dur)
+            }
         }
     }
 }
@@ -114,10 +152,8 @@ impl AdbConnection {
         };
 
         conn.handshake(addr)?;
-        if let AdbStream::Plain(ref s) = conn.stream {
-            let _ = s.set_read_timeout(None);
-            let _ = s.set_write_timeout(None);
-        }
+        let _ = conn.stream.set_read_timeout(None);
+        let _ = conn.stream.set_write_timeout(None);
         Ok(conn)
     }
 
@@ -205,7 +241,7 @@ impl AdbConnection {
             .map_err(|e| io::Error::other(e.to_string()))?;
 
         let tls_stream = StreamOwned::new(client, ack_stream);
-        self.stream = AdbStream::Tls(Box::new(tls_stream));
+        self.stream = AdbStream::Tls(Arc::new(Mutex::new(tls_stream)));
 
         Ok(())
     }

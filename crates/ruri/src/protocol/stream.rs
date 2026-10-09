@@ -125,132 +125,97 @@ pub fn run_exec_piped_input<R: Read>(
     Ok(0)
 }
 
-pub fn run_interactive_shell(stream: AdbStream) -> io::Result<()> {
-    match stream {
-        AdbStream::Plain(mut s) => {
-            let local_id: u32 = 1;
-            let _raw_term = RawTerminal::new()?;
+pub fn run_interactive_shell(mut stream: AdbStream) -> io::Result<()> {
+    let local_id: u32 = 1;
+    let _raw_term = RawTerminal::new()?;
 
-            let open_msg = AdbMessage::open(local_id, "shell:");
-            open_msg.write_to(&mut s)?;
+    // Request interactive PTY with TERM environment variable if possible
+    let service = "shell,v2,pty,TERM=xterm-256color:";
+    let open_msg = AdbMessage::open(local_id, service);
+    open_msg.write_to(&mut stream)?;
 
-            let ok_resp = AdbMessage::read_from(&mut s)?;
-            if ok_resp.header.command != A_OKAY || ok_resp.header.arg1 != local_id {
-                return Err(io::Error::new(
-                    io::ErrorKind::ConnectionRefused,
-                    format!(
-                        "Shell channel open failed (got 0x{:08X})",
-                        ok_resp.header.command
-                    ),
-                ));
-            }
+    let mut ok_resp = AdbMessage::read_from(&mut stream)?;
+    // If shell,v2 is not supported by legacy adbd, fall back to plain shell:
+    if ok_resp.header.command != A_OKAY {
+        let fallback_msg = AdbMessage::open(local_id, "shell:");
+        fallback_msg.write_to(&mut stream)?;
+        ok_resp = AdbMessage::read_from(&mut stream)?;
+    }
 
-            let remote_id = ok_resp.header.arg0;
-            let running = Arc::new(AtomicBool::new(true));
+    if ok_resp.header.command != A_OKAY || ok_resp.header.arg1 != local_id {
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            format!(
+                "Shell channel open failed (got 0x{:08X})",
+                ok_resp.header.command
+            ),
+        ));
+    }
 
-            let mut read_stream = s.try_clone()?;
-            let running_reader = Arc::clone(&running);
+    let remote_id = ok_resp.header.arg0;
+    let running = Arc::new(AtomicBool::new(true));
 
-            // Background reader from adb -> stdout
-            let reader_handle = thread::spawn(move || {
-                let mut stdout = io::stdout();
-                while running_reader.load(Ordering::Relaxed) {
-                    match AdbMessage::read_from(&mut read_stream) {
-                        Ok(msg) => {
-                            if msg.header.command == A_WRTE {
-                                let _ = stdout.write_all(&msg.payload);
-                                let _ = stdout.flush();
-                                let ack = AdbMessage::okay(local_id, remote_id);
-                                if ack.write_to(&mut read_stream).is_err() {
-                                    break;
-                                }
-                            } else if msg.header.command == A_CLSE {
-                                break;
-                            }
+    let mut read_stream = stream.try_clone()?;
+    let running_reader = Arc::clone(&running);
+
+    // Background reader from adbd -> local stdout
+    let reader_handle = thread::spawn(move || {
+        let mut stdout = io::stdout();
+        while running_reader.load(Ordering::Relaxed) {
+            match AdbMessage::read_from(&mut read_stream) {
+                Ok(msg) => {
+                    if msg.header.command == A_WRTE {
+                        let _ = stdout.write_all(&msg.payload);
+                        let _ = stdout.flush();
+                        let ack = AdbMessage::okay(local_id, remote_id);
+                        if ack.write_to(&mut read_stream).is_err() {
+                            break;
                         }
-                        Err(_) => break,
+                    } else if msg.header.command == A_CLSE {
+                        break;
                     }
                 }
-                running_reader.store(false, Ordering::Relaxed);
-            });
-
-            // Foreground non-blocking poll on stdin
-            let stdin_fd = io::stdin().as_raw_fd();
-            let mut stdin = io::stdin();
-            let mut in_buf = [0u8; 1024];
-
-            while running.load(Ordering::Relaxed) {
-                let mut pfd = libc::pollfd {
-                    fd: stdin_fd,
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
-
-                // Poll with 50ms timeout so we can exit as soon as remote sends CLSE
-                let ret = unsafe { libc::poll(&mut pfd, 1, 50) };
-                if ret > 0 && (pfd.revents & libc::POLLIN) != 0 {
-                    match stdin.read(&mut in_buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            let wrte = AdbMessage::wrte(
-                                local_id,
-                                remote_id,
-                                in_buf[..n].to_vec(),
-                            );
-                            if wrte.write_to(&mut s).is_err() {
-                                break;
-                            }
-                        }
-                        Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
-                            continue;
-                        }
-                        Err(_) => break,
-                    }
-                }
+                Err(_) => break,
             }
-
-            running.store(false, Ordering::Relaxed);
-            let clse = AdbMessage::clse(local_id, remote_id);
-            let _ = clse.write_to(&mut s);
-            let _ = reader_handle.join();
-
-            Ok(())
         }
-        AdbStream::Tls(mut s) => {
-            let local_id: u32 = 1;
-            let _raw_term = RawTerminal::new()?;
+        running_reader.store(false, Ordering::Relaxed);
+    });
 
-            let open_msg = AdbMessage::open(local_id, "shell:");
-            open_msg.write_to(&mut s)?;
+    // Foreground non-blocking poll on stdin
+    let stdin_fd = io::stdin().as_raw_fd();
+    let mut stdin = io::stdin();
+    let mut in_buf = [0u8; 1024];
 
-            let ok_resp = AdbMessage::read_from(&mut s)?;
-            if ok_resp.header.command != A_OKAY || ok_resp.header.arg1 != local_id {
-                return Err(io::Error::new(
-                    io::ErrorKind::ConnectionRefused,
-                    format!(
-                        "Shell channel open failed (got 0x{:08X})",
-                        ok_resp.header.command
-                    ),
-                ));
-            }
+    while running.load(Ordering::Relaxed) {
+        let mut pfd = libc::pollfd {
+            fd: stdin_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
 
-            let remote_id = ok_resp.header.arg0;
-            let mut stdout = io::stdout();
-
-            while let Ok(msg) = AdbMessage::read_from(&mut s) {
-                if msg.header.command == A_WRTE {
-                    let _ = stdout.write_all(&msg.payload);
-                    let _ = stdout.flush();
-                    let ack = AdbMessage::okay(local_id, remote_id);
-                    let _ = ack.write_to(&mut s);
-                } else if msg.header.command == A_CLSE {
-                    break;
+        let ret = unsafe { libc::poll(&mut pfd, 1, 50) };
+        if ret > 0 && (pfd.revents & libc::POLLIN) != 0 {
+            match stdin.read(&mut in_buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let wrte =
+                        AdbMessage::wrte(local_id, remote_id, in_buf[..n].to_vec());
+                    if wrte.write_to(&mut stream).is_err() {
+                        break;
+                    }
                 }
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {
+                    continue;
+                }
+                Err(_) => break,
             }
-
-            let clse = AdbMessage::clse(local_id, remote_id);
-            let _ = clse.write_to(&mut s);
-            Ok(())
         }
     }
+
+    running.store(false, Ordering::Relaxed);
+    let clse = AdbMessage::clse(local_id, remote_id);
+    let _ = clse.write_to(&mut stream);
+    let _ = reader_handle.join();
+
+    Ok(())
 }
